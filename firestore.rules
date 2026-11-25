@@ -1,0 +1,300 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Note: The Node.js/Express backend accesses Firestore via firebase-admin
+// (which bypasses client security rules). These rules protect Firestore
+// against unauthorized direct client SDK access.
+//
+// Collection: users
+// Document ID: auto-generated userId
+// Fields:
+//   - name: string (required, 2..80 chars)
+//   - email: string (required, valid email, <= 150 chars)
+//   - passwordHash: string (required, <= 200 chars)
+//   - role: string (required, 'admin' | 'teacher' | 'student')
+//   - isActive: bool (required)
+//   - createdAt: string (required, ISO 8601, immutable)
+//   - updatedAt: string (required, ISO 8601)
+//
+// Collection: refreshTokens
+// Document ID: jti (UUID)
+// Fields:
+//   - userId: string (required)
+//   - tokenHash: string (required)
+//   - revoked: bool (required)
+//   - createdAt: string (required, immutable)
+//   - updatedAt: string (required)
+//
+// Collection: students
+// Document ID: auto-generated studentId
+// Fields:
+//   - studentCode: string (required, 3..30 chars, immutable)
+//   - firstName: string (required, 1..60 chars)
+//   - lastName: string (required, 1..60 chars)
+//   - email: string (required, valid email, <= 150 chars)
+//   - department: string (required, 2..80 chars)
+//   - enrollmentYear: number (required, 1990..2100)
+//   - semester: number (required, 1..12)
+//   - status: string (required, 'active' | 'inactive' | 'graduated' | 'suspended')
+//   - gpa: number (required, 0..4.0)
+//   - createdBy: string (required, immutable)
+//   - createdAt: string (required, immutable)
+//   - updatedAt: string (required)
+//   - optional: dateOfBirth, gender, phone, address, program, guardianName, guardianPhone, userId
+//
+// Collection: courses
+// Document ID: auto-generated courseId
+// Fields:
+//   - courseCode: string (required, 2..20 chars)
+//   - title: string (required, 2..120 chars)
+//   - description: string (optional, <= 1000 chars)
+//   - credits: number (required, 0.5..12)
+//   - department: string (required, 2..80 chars)
+//   - maxCapacity: number (required, 1..1000)
+//   - semester: number (required, 1..12)
+//   - status: string (required, 'active' | 'archived')
+//   - createdBy: string (required, immutable)
+//   - createdAt: string (required, immutable)
+//   - updatedAt: string (required)
+//   - optional: instructorName, instructorId
+//
+// Collection: enrollments
+// Document ID: auto-generated enrollmentId
+// Fields:
+//   - studentId, courseId, studentCode, studentName, courseCode, courseTitle,
+//     credits, semester, status, score, grade, gradePoints, remarks,
+//     enrolledBy, gradedBy, gradedAt, createdAt, updatedAt
+//
+// Collection: attendance
+// Document ID: {studentId}_{courseId}_{date}
+// Fields:
+//   - studentId, courseId, studentCode, studentName, courseCode, courseTitle,
+//     date, status, remarks, markedBy, createdAt, updatedAt
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.role == 'admin';
+    }
+
+    function isStaff() {
+      return isAuthenticated() &&
+        request.auth.token.role in ['admin', 'teacher'];
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function validStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    function isValidOptionalString(field, minLen, maxLen) {
+      return !(field in request.resource.data) ||
+        (request.resource.data[field] is string &&
+         request.resource.data[field].size() >= minLen &&
+         request.resource.data[field].size() <= maxLen);
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.size() <= 150 &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.size() <= 40 &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasRequiredFields(['name', 'email', 'passwordHash', 'role', 'isActive', 'createdAt', 'updatedAt']) &&
+        hasOnlyAllowedFields(['name', 'email', 'passwordHash', 'role', 'isActive', 'createdAt', 'updatedAt']) &&
+        validStringLength('name', 2, 80) &&
+        isValidEmail(data.email) &&
+        validStringLength('passwordHash', 10, 200) &&
+        data.role in ['admin', 'teacher', 'student'] &&
+        data.isActive is bool &&
+        isValidDateString(data.createdAt) &&
+        isValidDateString(data.updatedAt);
+    }
+
+    function isValidStudent(data) {
+      return hasRequiredFields(['studentCode', 'firstName', 'lastName', 'email', 'department', 'enrollmentYear', 'semester', 'status', 'gpa', 'createdBy', 'createdAt', 'updatedAt']) &&
+        hasOnlyAllowedFields([
+          'studentCode', 'firstName', 'lastName', 'email', 'dateOfBirth', 'gender',
+          'phone', 'address', 'department', 'program', 'enrollmentYear', 'semester',
+          'status', 'guardianName', 'guardianPhone', 'userId', 'gpa', 'createdBy',
+          'createdAt', 'updatedAt'
+        ]) &&
+        validStringLength('studentCode', 3, 30) &&
+        validStringLength('firstName', 1, 60) &&
+        validStringLength('lastName', 1, 60) &&
+        isValidEmail(data.email) &&
+        validStringLength('department', 2, 80) &&
+        data.enrollmentYear is number && data.enrollmentYear >= 1990 && data.enrollmentYear <= 2100 &&
+        data.semester is number && data.semester >= 1 && data.semester <= 12 &&
+        data.status in ['active', 'inactive', 'graduated', 'suspended'] &&
+        data.gpa is number && data.gpa >= 0 && data.gpa <= 4.0 &&
+        validStringLength('createdBy', 1, 100) &&
+        isValidOptionalString('phone', 7, 20) &&
+        isValidOptionalString('address', 0, 250) &&
+        isValidOptionalString('program', 2, 100) &&
+        isValidOptionalString('guardianName', 0, 100) &&
+        isValidOptionalString('guardianPhone', 0, 20) &&
+        isValidDateString(data.createdAt) &&
+        isValidDateString(data.updatedAt);
+    }
+
+    function isValidCourse(data) {
+      return hasRequiredFields(['courseCode', 'title', 'credits', 'department', 'maxCapacity', 'semester', 'status', 'createdBy', 'createdAt', 'updatedAt']) &&
+        hasOnlyAllowedFields([
+          'courseCode', 'title', 'description', 'credits', 'department',
+          'instructorName', 'instructorId', 'maxCapacity', 'semester', 'status',
+          'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        validStringLength('courseCode', 2, 20) &&
+        validStringLength('title', 2, 120) &&
+        isValidOptionalString('description', 0, 1000) &&
+        data.credits is number && data.credits >= 0.5 && data.credits <= 12 &&
+        validStringLength('department', 2, 80) &&
+        data.maxCapacity is number && data.maxCapacity >= 1 && data.maxCapacity <= 1000 &&
+        data.semester is number && data.semester >= 1 && data.semester <= 12 &&
+        data.status in ['active', 'archived'] &&
+        validStringLength('createdBy', 1, 100) &&
+        isValidDateString(data.createdAt) &&
+        isValidDateString(data.updatedAt);
+    }
+
+    function isValidEnrollment(data) {
+      return hasRequiredFields(['studentId', 'courseId', 'status', 'credits', 'enrolledBy', 'createdAt', 'updatedAt']) &&
+        hasOnlyAllowedFields([
+          'studentId', 'courseId', 'studentCode', 'studentName', 'courseCode',
+          'courseTitle', 'credits', 'semester', 'status', 'score', 'grade',
+          'gradePoints', 'remarks', 'enrolledBy', 'gradedBy', 'gradedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        validStringLength('studentId', 1, 100) &&
+        validStringLength('courseId', 1, 100) &&
+        data.status in ['enrolled', 'completed', 'dropped'] &&
+        data.credits is number && data.credits >= 0.5 && data.credits <= 12 &&
+        isValidOptionalString('remarks', 0, 300) &&
+        validStringLength('enrolledBy', 1, 100) &&
+        isValidDateString(data.createdAt) &&
+        isValidDateString(data.updatedAt);
+    }
+
+    function isValidAttendance(data) {
+      return hasRequiredFields(['studentId', 'courseId', 'date', 'status', 'markedBy', 'createdAt', 'updatedAt']) &&
+        hasOnlyAllowedFields([
+          'studentId', 'courseId', 'studentCode', 'studentName', 'courseCode',
+          'courseTitle', 'date', 'status', 'remarks', 'markedBy',
+          'createdAt', 'updatedAt'
+        ]) &&
+        validStringLength('studentId', 1, 100) &&
+        validStringLength('courseId', 1, 100) &&
+        data.date is string && data.date.matches("^\\d{4}-\\d{2}-\\d{2}$") &&
+        data.status in ['present', 'absent', 'late', 'excused'] &&
+        isValidOptionalString('remarks', 0, 300) &&
+        validStringLength('markedBy', 1, 100) &&
+        isValidDateString(data.createdAt) &&
+        isValidDateString(data.updatedAt);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    // Refresh token hashes are strictly server-managed (firebase-admin only).
+    match /refreshTokens/{tokenId} {
+      allow read, write: if false;
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAdmin() && isValidUser(request.resource.data);
+      allow update: if isValidUser(request.resource.data) &&
+        areImmutableFieldsUnchanged(['createdAt', 'email']) &&
+        (isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role));
+      allow delete: if isAdmin();
+    }
+
+    match /students/{studentId} {
+      allow read: if isStaff() ||
+        (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow create: if isStaff() && isValidStudent(request.resource.data);
+      allow update: if isStaff() &&
+        isValidStudent(request.resource.data) &&
+        areImmutableFieldsUnchanged(['createdAt', 'createdBy']);
+      allow delete: if isAdmin();
+    }
+
+    match /courses/{courseId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaff() && isValidCourse(request.resource.data);
+      allow update: if isStaff() &&
+        isValidCourse(request.resource.data) &&
+        areImmutableFieldsUnchanged(['createdAt', 'createdBy']);
+      allow delete: if isAdmin();
+    }
+
+    match /enrollments/{enrollmentId} {
+      allow read: if isStaff() ||
+        (isAuthenticated() && resource.data.studentId == request.auth.uid);
+      allow create: if isStaff() && isValidEnrollment(request.resource.data);
+      allow update: if isStaff() &&
+        isValidEnrollment(request.resource.data) &&
+        areImmutableFieldsUnchanged(['createdAt', 'enrolledBy', 'studentId', 'courseId']);
+      allow delete: if isAdmin();
+    }
+
+    match /attendance/{attendanceId} {
+      allow read: if isStaff() ||
+        (isAuthenticated() && resource.data.studentId == request.auth.uid);
+      allow create: if isStaff() && isValidAttendance(request.resource.data);
+      allow update: if isStaff() &&
+        isValidAttendance(request.resource.data) &&
+        areImmutableFieldsUnchanged(['createdAt', 'studentId', 'courseId', 'date']);
+      allow delete: if isAdmin();
+    }
+
+    // Default deny for everything else
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
